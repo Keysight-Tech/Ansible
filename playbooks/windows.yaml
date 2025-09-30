@@ -1,6 +1,6 @@
 ---
 - name: Deploy CloudLens Agent to Windows VMs
-  hosts: windows_prod_vms
+  hosts: 10.38.3.85 #windows_prod_vms
   
   tasks:
 
