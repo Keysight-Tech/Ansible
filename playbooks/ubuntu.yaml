@@ -73,12 +73,6 @@
             enabled: true
       when: docker_installed.rc != 0
 
-    - name: Re-verify Docker is available after installation
-      ansible.builtin.command: command -v docker
-      register: docker_available
-      failed_when: docker_available.rc != 0
-      changed_when: false
-
     - name: Get Docker version
       ansible.builtin.command: docker --version
       register: docker_version
