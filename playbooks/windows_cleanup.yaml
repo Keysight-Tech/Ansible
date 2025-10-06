@@ -6,19 +6,14 @@
     - ../vars/cloudlens.yml
   
   tasks:
-    - name: Check if CloudLens Agent is installed
+    - name: Check if CloudLens is installed
       win_shell: |
         $paths = @(
           "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
           "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
         )
-        $found = Get-ItemProperty $paths -ErrorAction SilentlyContinue | 
-          Where-Object { $_.DisplayName -like "*CloudLens*" }
-        if ($found) {
-          Write-Output "FOUND"
-        } else {
-          Write-Output "NOT_FOUND"
-        }
+        $found = Get-ItemProperty $paths -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like "*CloudLens*" }
+        if ($found) { Write-Output "FOUND" } else { Write-Output "NOT_FOUND" }
       register: cloudlens_check
       changed_when: false
 
@@ -29,40 +24,39 @@
       ignore_errors: true
       when: "'FOUND' in cloudlens_check.stdout"
 
-    - name: Uninstall CloudLens Agent using MSI
+    - name: Uninstall CloudLens Agent
       win_shell: |
         $paths = @(
           "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
           "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
         )
-        $app = Get-ItemProperty $paths -ErrorAction SilentlyContinue | 
-          Where-Object { $_.DisplayName -like "*CloudLens*" }
+        $app = Get-ItemProperty $paths -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like "*CloudLens*" }
         
-        if ($app.UninstallString) {
-          # Split on newlines in case there are multiple uninstall methods
-          $uninstallLines = $app.UninstallString -split "`n"
-          
-          # Try MSI first
-          $msiLine = $uninstallLines | Where-Object { $_ -match "MsiExec" } | Select-Object -First 1
-          if ($msiLine) {
-            if ($msiLine -match '\{([A-F0-9-]+)\}') {
-              $productCode = $matches[1]
-              Write-Output "Using MSI uninstall for product: {$productCode}"
-              $result = Start-Process msiexec.exe -ArgumentList "/x {$productCode} /quiet /norestart" -Wait -PassThru
-              Write-Output "MSI uninstall exit code: $($result.ExitCode)"
-              exit $result.ExitCode
-            }
-          }
-          
-          # Try EXE if MSI didn't work
-          $exeLine = $uninstallLines | Where-Object { $_ -match "\.exe" } | Select-Object -First 1
-          if ($exeLine) {
-            $exeLine = $exeLine.Trim('"')
-            Write-Output "Using EXE uninstall: $exeLine"
-            $result = Start-Process -FilePath $exeLine -ArgumentList "/uninstall /quiet" -Wait -PassThru
-            Write-Output "EXE uninstall exit code: $($result.ExitCode)"
-            exit $result.ExitCode
-          }
+        if (-not $app.UninstallString) {
+          Write-Output "No uninstall string found"
+          exit 1
+        }
+        
+        $uninstallLines = $app.UninstallString -split "`n"
+        
+        # Try MSI first
+        $msiLine = $uninstallLines | Where-Object { $_ -match "MsiExec" } | Select-Object -First 1
+        if ($msiLine -and $msiLine -match '\{([A-F0-9-]+)\}') {
+          $productCode = $matches[1]
+          Write-Output "Uninstalling MSI product: {$productCode}"
+          $proc = Start-Process msiexec.exe -ArgumentList "/x {$productCode} /quiet /norestart" -Wait -PassThru
+          Write-Output "Exit code: $($proc.ExitCode)"
+          exit $proc.ExitCode
+        }
+        
+        # Try EXE if MSI failed
+        $exeLine = $uninstallLines | Where-Object { $_ -match "\.exe" } | Select-Object -First 1
+        if ($exeLine) {
+          $exePath = $exeLine.Trim().Trim('"')
+          Write-Output "Uninstalling using EXE: $exePath"
+          $proc = Start-Process -FilePath $exePath -ArgumentList "/uninstall /quiet" -Wait -PassThru
+          Write-Output "Exit code: $($proc.ExitCode)"
+          exit $proc.ExitCode
         }
         
         Write-Output "No valid uninstall method found"
@@ -71,64 +65,33 @@
       when: "'FOUND' in cloudlens_check.stdout"
       failed_when: uninstall_result.rc not in [0, 1605, 3010]
 
-    - name: Display uninstall result
-      debug:
-        var: uninstall_result.stdout_lines
-      when: uninstall_result is defined
-
-    - name: Wait for uninstall to complete
+    - name: Wait for uninstall
       ansible.builtin.pause:
         seconds: 15
       when: "'FOUND' in cloudlens_check.stdout"
 
-    - name: Verify CloudLens is uninstalled
+    - name: Verify removal
       win_shell: |
         $paths = @(
           "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
           "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
         )
-        $still_exists = Get-ItemProperty $paths -ErrorAction SilentlyContinue | 
-          Where-Object { $_.DisplayName -like "*CloudLens*" }
-        if ($still_exists) {
-          Write-Output "STILL_EXISTS"
-          exit 1
-        } else {
-          Write-Output "SUCCESSFULLY_REMOVED"
-          exit 0
-        }
+        $exists = Get-ItemProperty $paths -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like "*CloudLens*" }
+        if ($exists) { Write-Output "STILL_EXISTS"; exit 1 } else { Write-Output "REMOVED"; exit 0 }
       register: verify_uninstall
       changed_when: false
 
-    - name: Fail if still installed
-      fail:
-        msg: "CloudLens Agent is still installed after uninstall attempt!"
-      when: 
-        - verify_uninstall is defined
-        - "'STILL_EXISTS' in verify_uninstall.stdout"
-
-    - name: Remove installation directory
+    - name: Remove directories
       win_file:
-        path: C:\Program Files\Keysight\CloudLens
+        path: "{{ item }}"
         state: absent
+      loop:
+        - C:\Program Files\Keysight\CloudLens
+        - C:\ProgramData\CloudLens
+        - "C:\\temp\\{{ cloudlens_installer_filename }}"
+        - C:\temp\cloudlens_ca.crt
       ignore_errors: true
-
-    - name: Remove ProgramData directory
-      win_file:
-        path: C:\ProgramData\CloudLens
-        state: absent
-      ignore_errors: true
-
-    - name: Delete installer from temp
-      win_file:
-        path: "C:\\temp\\{{ cloudlens_installer_filename }}"
-        state: absent
-
-    - name: Delete CA cert from temp
-      win_file:
-        path: C:\temp\cloudlens_ca.crt
-        state: absent
 
     - name: Final status
       debug:
-        msg: "CloudLens Agent successfully uninstalled"
-      when: "'SUCCESSFULLY_REMOVED' in verify_uninstall.stdout"
+        msg: "Uninstall {{ 'SUCCESSFUL' if 'REMOVED' in verify_uninstall.stdout else 'FAILED - CHECK MANUALLY' }}"
