@@ -1,70 +1,182 @@
-- name: Cleanup CloudLens Agent and Docker from Ubuntu VMs
+---
+- name: Uninstall CloudLens Agent from Ubuntu VMs
   hosts: "{{ target_group }}"
   become: yes
   vars_files:
     - ../vars/cloudlens.yaml
 
   tasks:
-    - name: Stop and remove CloudLens agent container if exists
-      ansible.builtin.shell: docker ps -aq -f name=cloudlens-agent | xargs -r docker rm -f
-      register: cloudlens_agent_removed
-      changed_when: cloudlens_agent_removed.rc == 0
+    - name: Gather facts about the system
+      ansible.builtin.setup:
 
-    - name: Remove CA certificate if exists
+    - name: Check if Docker is installed
+      ansible.builtin.command: command -v docker
+      register: docker_installed
+      failed_when: false
+      changed_when: false
+
+    - name: Display Docker installation status
+      debug:
+        msg: "Docker is {{ 'installed' if docker_installed.rc == 0 else 'not installed' }}"
+
+    - name: Check if CloudLens container exists
+      ansible.builtin.shell: docker ps -a --filter name={{ cloudlens_agent_container_name }} --format '{{"{{"}}.Names{{"}}"}}'
+      register: container_exists
+      when: docker_installed.rc == 0
+      changed_when: false
+      failed_when: false
+
+    - name: Display container status
+      debug:
+        msg: "CloudLens container {{ 'exists' if container_exists.stdout != '' else 'does not exist' }}"
+      when: docker_installed.rc == 0
+
+    - name: Stop CloudLens agent container if running
+      ansible.builtin.shell: docker stop {{ cloudlens_agent_container_name }}
+      when: 
+        - docker_installed.rc == 0
+        - container_exists.stdout != ""
+      ignore_errors: yes
+      register: stop_result
+
+    - name: Remove CloudLens agent container
+      ansible.builtin.shell: docker rm -f {{ cloudlens_agent_container_name }}
+      when: 
+        - docker_installed.rc == 0
+        - container_exists.stdout != ""
+      ignore_errors: yes
+      register: remove_result
+
+    - name: Display removal result
+      debug:
+        var: remove_result.stdout_lines
+      when: remove_result is defined
+
+    - name: Verify container is removed
+      ansible.builtin.shell: docker ps -a --filter name={{ cloudlens_agent_container_name }} --format '{{"{{"}}.Names{{"}}"}}'
+      register: verify_removed
+      when: docker_installed.rc == 0
+      changed_when: false
+      failed_when: verify_removed.stdout != ""
+
+    - name: Check if CloudLens sensor image exists
+      ansible.builtin.shell: docker images {{ cloudlens_manager_ip_or_FQDN }}/sensor --format '{{"{{"}}.Repository{{"}}"}}'
+      register: image_exists
+      when: docker_installed.rc == 0
+      changed_when: false
+      failed_when: false
+
+    - name: Remove CloudLens sensor image if exists
+      ansible.builtin.shell: docker rmi {{ cloudlens_manager_ip_or_FQDN }}/sensor
+      when: 
+        - docker_installed.rc == 0
+        - image_exists.stdout != ""
+      ignore_errors: yes
+      register: image_remove_result
+
+    - name: Display image removal result
+      debug:
+        var: image_remove_result.stdout_lines
+      when: image_remove_result is defined
+
+    - name: Remove CA certificate from ca_cert_dir (correct path)
       ansible.builtin.file:
-        path: /etc/ssl/certs/cloudlenscerts.crt
+        path: "{{ ca_cert_dir }}/cloudlenscerts.crt"
         state: absent
       when: registry_type == "secure"
 
-    - name: Remove Docker daemon configuration for insecure registry if exists
+    - name: Remove CA certificate from Docker certs.d directory
+      ansible.builtin.file:
+        path: "/etc/docker/certs.d/{{ cloudlens_manager_ip_or_FQDN }}/ca.crt"
+        state: absent
+      when: registry_type == "secure"
+
+    - name: Remove Docker certs.d directory for CloudLens
+      ansible.builtin.file:
+        path: "/etc/docker/certs.d/{{ cloudlens_manager_ip_or_FQDN }}"
+        state: absent
+      when: registry_type == "secure"
+
+    - name: Remove Docker daemon configuration
       ansible.builtin.file:
         path: /etc/docker/daemon.json
-        state: absent
-      when: registry_type == "insecure"
-
-    - name: Stop Docker service
-      ansible.builtin.systemd:
-        name: docker
-        state: stopped
-      ignore_errors: yes
-
-    - name: Remove Docker packages
-      ansible.builtin.apt:
-        name:
-          - docker-ce
-          - docker-ce-cli
-          - containerd.io
-        state: absent
-      ignore_errors: yes
-
-    - name: Remove Docker repository entry
-      ansible.builtin.file:
-        path: /etc/apt/sources.list.d/docker.list
-        state: absent
-
-    - name: Delete Docker's GPG key
-      ansible.builtin.file:
-        path: /usr/share/keyrings/docker-archive-keyring.gpg
-        state: absent
-
-    - name: Remove prerequisites for Docker
-      ansible.builtin.apt:
-        name:
-          - apt-transport-https
-          - ca-certificates
-          - curl
-          - software-properties-common
-        state: absent
-
-   
-
-    - name: Remove /etc/docker directory if exists
-      ansible.builtin.file:
-        path: /etc/docker
         state: absent
 
     - name: Remove CloudLens log directory
       ansible.builtin.file:
         path: /var/log/cloudlens
         state: absent
+
+    - name: Remove /var/lib/docker/volumes related to CloudLens (if any)
+      ansible.builtin.shell: docker volume ls -q | grep cloudlens | xargs -r docker volume rm
+      when: docker_installed.rc == 0
       ignore_errors: yes
+
+    - name: Optional - Check for other containers using Docker
+      ansible.builtin.shell: docker ps -a --format '{{"{{"}}.Names{{"}}"}}'
+      register: other_containers
+      when: docker_installed.rc == 0
+      changed_when: false
+
+    - name: Display other containers
+      debug:
+        msg: "Other containers on system: {{ other_containers.stdout_lines if other_containers.stdout_lines | length > 0 else 'None' }}"
+      when: docker_installed.rc == 0
+
+    - name: Prompt about Docker removal
+      debug:
+        msg: |
+          WARNING: Docker removal is optional and NOT included by default.
+          Other containers may be using Docker: {{ other_containers.stdout_lines | length if other_containers.stdout_lines is defined else 'unknown' }}
+          
+          To remove Docker, set variable: remove_docker=true
+
+    - name: Stop Docker service (OPTIONAL - only if remove_docker=true)
+      ansible.builtin.systemd:
+        name: docker
+        state: stopped
+      when: remove_docker | default(false) | bool
+      ignore_errors: yes
+
+    - name: Remove Docker packages (OPTIONAL - only if remove_docker=true)
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+        state: absent
+        autoremove: yes
+      when: remove_docker | default(false) | bool
+
+    - name: Remove Docker repository (OPTIONAL - only if remove_docker=true)
+      ansible.builtin.file:
+        path: /etc/apt/sources.list.d/docker.list
+        state: absent
+      when: remove_docker | default(false) | bool
+
+    - name: Remove Docker GPG key (OPTIONAL - only if remove_docker=true)
+      ansible.builtin.file:
+        path: /usr/share/keyrings/docker-archive-keyring.gpg
+        state: absent
+      when: remove_docker | default(false) | bool
+
+    - name: Remove /etc/docker directory (OPTIONAL - only if remove_docker=true)
+      ansible.builtin.file:
+        path: /etc/docker
+        state: absent
+      when: remove_docker | default(false) | bool
+
+    - name: Final verification - CloudLens completely removed
+      ansible.builtin.shell: |
+        # Check for any CloudLens processes
+        ps aux | grep -i cloudlens | grep -v grep || echo "No CloudLens processes"
+        
+        # Check for any CloudLens files
+        find /var/log -name "*cloudlens*" 2>/dev/null || echo "No CloudLens logs"
+      register: final_check
+      changed_when: false
+      failed_when: false
+
+    - name: Display final verification
+      debug:
+        var: final_check.stdout_lines
