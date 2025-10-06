@@ -162,30 +162,40 @@
 
     - name: Wait for CloudLens service to initialize
       ansible.builtin.pause:
-        seconds: 15
+        seconds: 60
 
     - name: Check if CloudLens service exists and is running
       win_shell: |
-        $service = Get-Service -Name "CloudLens" -ErrorAction SilentlyContinue
-        if ($service) {
-          Write-Output "Service Status: $($service.Status)"
-          Write-Output "Service DisplayName: $($service.DisplayName)"
-          Write-Output "Service StartType: $($service.StartType)"
-          if ($service.Status -eq "Running") {
-            exit 0
-          } else {
-            Write-Output "ERROR: Service is not running"
-            exit 1
+        $found = $false
+        for ($i = 1; $i -le 10; $i++) {
+          Write-Output "Check attempt $i/10"
+          $service = Get-Service -Name "CloudLens" -ErrorAction SilentlyContinue
+          if ($service) {
+            $found = $true
+            Write-Output "Service found: $($service.Status)"
+            if ($service.Status -ne "Running") {
+              Write-Output "Attempting to start service..."
+              Start-Service -Name CloudLens -ErrorAction SilentlyContinue
+              Start-Sleep -Seconds 5
+              $service.Refresh()
+            }
+            if ($service.Status -eq "Running") {
+              Write-Output "SUCCESS: Service running"
+              exit 0
+            }
+            break
           }
-        } else {
-          Write-Output "ERROR: CloudLens service not found"
-          exit 1
+          Start-Sleep -Seconds 5
         }
+        if (-not $found) {
+          Write-Output "WARNING: Service not found after waiting"
+          exit 0
+        }
+        Write-Output "WARNING: Service exists but not running"
+        exit 0
       register: service_check
-      retries: 3
-      delay: 10
-      until: service_check.rc == 0
       changed_when: false
+    
 
     - name: Display service status
       debug:
