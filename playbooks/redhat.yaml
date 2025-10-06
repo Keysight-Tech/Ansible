@@ -1,3 +1,4 @@
+---
 - name: Deploy CloudLens Agent to Red Hat VMs with Podman
   hosts: "{{ target_group }}"
   become: yes
@@ -30,7 +31,7 @@
       debug:
         msg: "Podman is {{ 'installed' if podman_installed.rc == 0 else 'not installed' }}."
 
-    - name: Install Podman on RHEL 
+    - name: Install Podman on RHEL 8+
       ansible.builtin.dnf:
         name:
           - podman
@@ -40,7 +41,7 @@
         - ansible_os_family == 'RedHat'
         - ansible_distribution_major_version | int >= 8
 
-    - name: Install Podman and container-tools on RHEL 
+    - name: Install Podman and container-tools on RHEL 7
       ansible.builtin.yum:
         name:
           - podman
@@ -51,21 +52,22 @@
         - ansible_os_family == 'RedHat'
         - ansible_distribution_major_version | int < 8
 
+    - name: Re-verify Podman is available after installation
+      ansible.builtin.command: command -v podman
+      register: podman_available
+      failed_when: podman_available.rc != 0
+      changed_when: false
+
     - name: Get Podman version
       ansible.builtin.command: podman --version
       register: podman_version
       changed_when: false
-      when: podman_installed.rc == 0
 
+    - name: Display Podman version
+      debug:
+        msg: "{{ podman_version.stdout }}"
 
-    - name: Ensure Podman service is enabled (no daemon, so just verify)
-      ansible.builtin.systemd:
-        name: podman
-        enabled: false
-        state: stopped
-      when: podman_installed.rc != 0
-
-    - name: Configure Podman daemon for insecure registry (all platforms)
+    - name: Configure Podman for insecure registry
       copy:
         dest: /etc/containers/registries.conf.d/cloudlens.conf
         content: |
@@ -73,11 +75,6 @@
           location = "{{ cloudlens_manager_ip_or_FQDN }}"
           insecure = true
         mode: '0644'
-      when: registry_type == "insecure"
-
-    - name: Reload container registries configuration (Podman)
-      ansible.builtin.command: "systemctl restart podman.socket"
-      ignore_errors: yes
       when: registry_type == "insecure"
 
     - name: Transfer CA certificate from local to VM (for secure registries)
@@ -89,33 +86,39 @@
 
     - name: Update CA certificates on Red Hat (for secure registries)
       ansible.builtin.command: update-ca-trust extract
-      become: yes
       when: registry_type == "secure"
 
-    - name: Remove existing CloudLens agent container if exists 
-      ansible.builtin.shell: "{{ podman_command }} rm -f {{ cloudlens_agent_container_name }}"
+    - name: Remove existing CloudLens agent container if exists
+      ansible.builtin.shell: "podman rm -f {{ cloudlens_agent_container_name }}"
       ignore_errors: yes
 
-    - name: Pull CloudLens sensor image from registry 
+    - name: Pull CloudLens sensor image from registry
       ansible.builtin.shell: >
-        {{ podman_command }} pull
+        podman pull
         {% if registry_type == 'insecure' %}--tls-verify=false{% endif %}
         {{ cloudlens_manager_ip_or_FQDN }}/sensor:latest
+      register: podman_pull_result
+
+    - name: Display pull result
+      debug:
+        var: podman_pull_result.stdout_lines
 
     - name: Run CloudLens Agent container with Podman
       ansible.builtin.shell: |
-        {{ podman_command }} run -d \
+        podman run -d \
         -v /lib/modules:/lib/modules \
         -v /var/log/cloudlens:/var/log/cloudlens \
         -v /var/tmp/cloudtap:/var/cloudtap \
         -v /:/host \
         {% if registry_type == 'secure' %}-v "{{ ca_cert_dir }}:/usr/local/share/ca-certificates:ro" {% endif %} \
-        --cap-add NET_BROADCAST --cap-add SYS_ADMIN --cap-add SYS_MODULE --cap-add SYS_RESOURCE --cap-add NET_RAW --cap-add NET_ADMIN \
+        --cap-add NET_BROADCAST --cap-add SYS_ADMIN --cap-add SYS_MODULE \
+        --cap-add SYS_RESOURCE --cap-add NET_RAW --cap-add NET_ADMIN \
         --security-opt label=disable \
         --name "{{ cloudlens_agent_container_name }}" \
         --restart=always \
         --net=host \
-        --log-opt max-size="{{ log_max_size }}" --log-opt max-file="{{ log_max_file }}" \
+        --log-opt max-size="{{ log_max_size }}" \
+        --log-opt max-file="{{ log_max_file }}" \
         "{{ cloudlens_manager_ip_or_FQDN }}/sensor:latest" \
         --accept_eula yes \
         --loglevel debug \
@@ -123,15 +126,34 @@
         --server "{{ cloudlens_manager_ip_or_FQDN }}" \
         --custom_tags "{{ custom_tags }}" \
         --ssl_verify {% if registry_type == 'secure' %}yes{% else %}no{% endif %}
-      when: podman_installed.rc == 0
+      register: podman_run_result
 
-    - name: Check if CloudLens agent container is running
-      ansible.builtin.shell: >
-        podman inspect -f '{{"{{"}}.State.Status{{"}}"}}' {{ cloudlens_agent_container_name }}
-      register: agent_status
-      changed_when: false
-      failed_when: false
-
-    - name: Print CloudLens agent status
+    - name: Display container run output
       debug:
-            msg: "CloudLens agent container is {{ agent_status.stdout | default('NOT FOUND') }}"
+        var: podman_run_result
+
+    - name: Wait for container to initialize
+      ansible.builtin.pause:
+        seconds: 5
+
+    - name: Verify CloudLens agent container is running
+      ansible.builtin.shell: >
+        podman ps --filter name={{ cloudlens_agent_container_name }} --format '{{"{{"}}.Names{{"}}"}}'
+      register: agent_running
+      changed_when: false
+      failed_when: agent_running.stdout == ""
+
+    - name: Display agent status
+      debug:
+        msg: "CloudLens agent container '{{ agent_running.stdout }}' is running"
+
+    - name: Get container logs on failure
+      ansible.builtin.shell: podman logs {{ cloudlens_agent_container_name }}
+      register: container_logs
+      when: agent_running.stdout == ""
+      ignore_errors: yes
+
+    - name: Display container logs if failed
+      debug:
+        var: container_logs.stdout_lines
+      when: agent_running.stdout == ""
