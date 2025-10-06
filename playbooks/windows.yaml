@@ -162,7 +162,7 @@
 
     - name: Wait for CloudLens service to initialize
       ansible.builtin.pause:
-        seconds: 60
+        seconds: 30
 
     - name: Check if CloudLens service exists and is running
       win_shell: |
