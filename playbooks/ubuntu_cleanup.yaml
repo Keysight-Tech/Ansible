@@ -19,67 +19,44 @@
       debug:
         msg: "Docker is {{ 'installed' if docker_installed.rc == 0 else 'not installed' }}"
 
-    - name: Check if CloudLens container exists
-      ansible.builtin.shell: docker ps -a --filter name={{ cloudlens_agent_container_name }} --format '{{"{{"}}.Names{{"}}"}}'
-      register: container_exists
+    - name: Force stop and remove CloudLens container (simplified)
+      ansible.builtin.shell: |
+        docker stop {{ cloudlens_agent_container_name }} 2>/dev/null || true
+        docker rm -f {{ cloudlens_agent_container_name }} 2>/dev/null || true
       when: docker_installed.rc == 0
-      changed_when: false
-      failed_when: false
+      register: container_removal
 
-    - name: Display container status
+    - name: Display container removal output
       debug:
-        msg: "CloudLens container {{ 'exists' if container_exists.stdout != '' else 'does not exist' }}"
-      when: docker_installed.rc == 0
+        msg: "Container removal executed"
+      when: container_removal is defined
 
-    - name: Stop CloudLens agent container if running
-      ansible.builtin.shell: docker stop {{ cloudlens_agent_container_name }}
-      when: 
-        - docker_installed.rc == 0
-        - container_exists.stdout != ""
-      ignore_errors: yes
-      register: stop_result
-
-    - name: Remove CloudLens agent container
-      ansible.builtin.shell: docker rm -f {{ cloudlens_agent_container_name }}
-      when: 
-        - docker_installed.rc == 0
-        - container_exists.stdout != ""
-      ignore_errors: yes
-      register: remove_result
-
-    - name: Display removal result
-      debug:
-        var: remove_result.stdout_lines
-      when: remove_result is defined
-
-    - name: Verify container is removed
+    - name: Verify container is actually gone
       ansible.builtin.shell: docker ps -a --filter name={{ cloudlens_agent_container_name }} --format '{{"{{"}}.Names{{"}}"}}'
       register: verify_removed
       when: docker_installed.rc == 0
       changed_when: false
-      failed_when: verify_removed.stdout != ""
 
-    - name: Check if CloudLens sensor image exists
-      ansible.builtin.shell: docker images {{ cloudlens_manager_ip_or_FQDN }}/sensor --format '{{"{{"}}.Repository{{"}}"}}'
-      register: image_exists
-      when: docker_installed.rc == 0
-      changed_when: false
-      failed_when: false
-
-    - name: Remove CloudLens sensor image if exists
-      ansible.builtin.shell: docker rmi {{ cloudlens_manager_ip_or_FQDN }}/sensor
-      when: 
-        - docker_installed.rc == 0
-        - image_exists.stdout != ""
-      ignore_errors: yes
-      register: image_remove_result
-
-    - name: Display image removal result
+    - name: Show verification result
       debug:
-        var: image_remove_result.stdout_lines
-      when: image_remove_result is defined
+        msg: "Container still exists: {{ verify_removed.stdout }}"
+      when: 
+        - verify_removed is defined
+        - verify_removed.stdout != ""
 
-    - name: Remove CA certificate from ca_cert_dir (correct path)
+    - name: Fail if container still exists
+      fail:
+        msg: "CloudLens container still running after removal attempt!"
+      when: 
+        - verify_removed is defined
+        - verify_removed.stdout != ""
+
+    - name: Remove CloudLens sensor image
+      ansible.builtin.shell: docker rmi -f {{ cloudlens_manager_ip_or_FQDN }}/sensor 2>/dev/null || true
+      when: docker_installed.rc == 0
+      register: image_removal
+
+    - name: Remove CA certificate from ca_cert_dir
       ansible.builtin.file:
         path: "{{ ca_cert_dir }}/cloudlenscerts.crt"
         state: absent
@@ -107,38 +84,31 @@
         path: /var/log/cloudlens
         state: absent
 
-    - name: Remove /var/lib/docker/volumes related to CloudLens (if any)
-      ansible.builtin.shell: docker volume ls -q | grep cloudlens | xargs -r docker volume rm
+    - name: Remove Docker volumes related to CloudLens
+      ansible.builtin.shell: docker volume ls -q | grep cloudlens | xargs -r docker volume rm 2>/dev/null || true
       when: docker_installed.rc == 0
       ignore_errors: yes
 
-    - name: Optional - Check for other containers using Docker
+    - name: Check for other containers
       ansible.builtin.shell: docker ps -a --format '{{"{{"}}.Names{{"}}"}}'
       register: other_containers
       when: docker_installed.rc == 0
       changed_when: false
+      failed_when: false
 
     - name: Display other containers
       debug:
-        msg: "Other containers on system: {{ other_containers.stdout_lines if other_containers.stdout_lines | length > 0 else 'None' }}"
+        msg: "Other containers: {{ other_containers.stdout_lines | default(['None']) }}"
       when: docker_installed.rc == 0
 
-    - name: Prompt about Docker removal
-      debug:
-        msg: |
-          WARNING: Docker removal is optional and NOT included by default.
-          Other containers may be using Docker: {{ other_containers.stdout_lines | length if other_containers.stdout_lines is defined else 'unknown' }}
-          
-          To remove Docker, set variable: remove_docker=true
-
-    - name: Stop Docker service (OPTIONAL - only if remove_docker=true)
+    - name: Stop Docker service (OPTIONAL)
       ansible.builtin.systemd:
         name: docker
         state: stopped
       when: remove_docker | default(false) | bool
       ignore_errors: yes
 
-    - name: Remove Docker packages (OPTIONAL - only if remove_docker=true)
+    - name: Remove Docker packages (OPTIONAL)
       ansible.builtin.apt:
         name:
           - docker-ce
@@ -148,35 +118,38 @@
         autoremove: yes
       when: remove_docker | default(false) | bool
 
-    - name: Remove Docker repository (OPTIONAL - only if remove_docker=true)
+    - name: Remove Docker repository (OPTIONAL)
       ansible.builtin.file:
         path: /etc/apt/sources.list.d/docker.list
         state: absent
       when: remove_docker | default(false) | bool
 
-    - name: Remove Docker GPG key (OPTIONAL - only if remove_docker=true)
+    - name: Remove Docker GPG key (OPTIONAL)
       ansible.builtin.file:
         path: /usr/share/keyrings/docker-archive-keyring.gpg
         state: absent
       when: remove_docker | default(false) | bool
 
-    - name: Remove /etc/docker directory (OPTIONAL - only if remove_docker=true)
+    - name: Remove /etc/docker directory (OPTIONAL)
       ansible.builtin.file:
         path: /etc/docker
         state: absent
       when: remove_docker | default(false) | bool
 
-    - name: Final verification - CloudLens completely removed
+    - name: Final verification
       ansible.builtin.shell: |
-        # Check for any CloudLens processes
+        echo "=== Docker containers ==="
+        docker ps -a 2>/dev/null || echo "Docker not available"
+        echo "=== CloudLens processes ==="
         ps aux | grep -i cloudlens | grep -v grep || echo "No CloudLens processes"
-        
-        # Check for any CloudLens files
+        echo "=== CloudLens files ==="
         find /var/log -name "*cloudlens*" 2>/dev/null || echo "No CloudLens logs"
       register: final_check
+      when: docker_installed.rc == 0
       changed_when: false
       failed_when: false
 
-    - name: Display final verification
+    - name: Display final status
       debug:
         var: final_check.stdout_lines
+      when: final_check is defined
