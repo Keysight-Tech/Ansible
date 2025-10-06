@@ -9,14 +9,14 @@ local_ca_path: "/dev/null"
 ca_cert_dir: "/etc/ssl/certs"
 
 #Docker
-remove_docker: true
+#remove_docker: true
 
 #Log size for container logs
 log_max_size: "50m"
 log_max_file: "5"
 
 podman_command: podman
-remove_podman: true
+#remove_podman: true
 redhat_ca_cert_dir: "/etc/pki/ca-trust/source/anchors"
 
 local_installer_path: "{{ playbook_dir }}/../files/cloudlens-win-sensor-6.12.0.316.exe"
