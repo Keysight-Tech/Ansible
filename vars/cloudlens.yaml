@@ -8,6 +8,10 @@ registry_type: "insecure"
 local_ca_path: "/dev/null"
 ca_cert_dir: "/etc/ssl/certs"
 
+#Docker
+remove_docker: true
+
+#Log size for container logs
 log_max_size: "50m"
 log_max_file: "5"
 
