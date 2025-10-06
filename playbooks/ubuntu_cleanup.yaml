@@ -19,42 +19,35 @@
       debug:
         msg: "Docker is {{ 'installed' if docker_installed.rc == 0 else 'not installed' }}"
 
-    - name: Force stop and remove CloudLens container (simplified)
+    - name: Force stop and remove CloudLens container
       ansible.builtin.shell: |
         docker stop {{ cloudlens_agent_container_name }} 2>/dev/null || true
         docker rm -f {{ cloudlens_agent_container_name }} 2>/dev/null || true
       when: docker_installed.rc == 0
       register: container_removal
 
-    - name: Display container removal output
-      debug:
-        msg: "Container removal executed"
-      when: container_removal is defined
-
-    - name: Verify container is actually gone
+    - name: Verify container is removed
       ansible.builtin.shell: docker ps -a --filter name={{ cloudlens_agent_container_name }} --format '{{"{{"}}.Names{{"}}"}}'
       register: verify_removed
       when: docker_installed.rc == 0
       changed_when: false
 
-    - name: Show verification result
+    - name: Display container status after removal
       debug:
-        msg: "Container still exists: {{ verify_removed.stdout }}"
-      when: 
-        - verify_removed is defined
-        - verify_removed.stdout != ""
+        msg: "Container {{ 'STILL EXISTS' if (verify_removed.stdout | default('')) != '' else 'REMOVED' }}"
+      when: verify_removed is defined
 
     - name: Fail if container still exists
       fail:
-        msg: "CloudLens container still running after removal attempt!"
+        msg: "CloudLens container still exists after removal!"
       when: 
         - verify_removed is defined
+        - verify_removed.stdout is defined
         - verify_removed.stdout != ""
 
     - name: Remove CloudLens sensor image
       ansible.builtin.shell: docker rmi -f {{ cloudlens_manager_ip_or_FQDN }}/sensor 2>/dev/null || true
       when: docker_installed.rc == 0
-      register: image_removal
 
     - name: Remove CA certificate from ca_cert_dir
       ansible.builtin.file:
@@ -99,7 +92,7 @@
     - name: Display other containers
       debug:
         msg: "Other containers: {{ other_containers.stdout_lines | default(['None']) }}"
-      when: docker_installed.rc == 0
+      when: other_containers is defined
 
     - name: Stop Docker service (OPTIONAL)
       ansible.builtin.systemd:
@@ -138,12 +131,14 @@
 
     - name: Final verification
       ansible.builtin.shell: |
-        echo "=== Docker containers ==="
-        docker ps -a 2>/dev/null || echo "Docker not available"
+        echo "=== Containers ==="
+        docker ps -a 2>/dev/null || echo "Docker not running"
+        echo ""
         echo "=== CloudLens processes ==="
-        ps aux | grep -i cloudlens | grep -v grep || echo "No CloudLens processes"
+        ps aux | grep -i cloudlens | grep -v grep || echo "None found"
+        echo ""
         echo "=== CloudLens files ==="
-        find /var/log -name "*cloudlens*" 2>/dev/null || echo "No CloudLens logs"
+        find /var/log -name "*cloudlens*" 2>/dev/null || echo "None found"
       register: final_check
       when: docker_installed.rc == 0
       changed_when: false
@@ -152,4 +147,4 @@
     - name: Display final status
       debug:
         var: final_check.stdout_lines
-      when: final_check is defined
+      when: final_check is defined and final_check.stdout_lines is defined
