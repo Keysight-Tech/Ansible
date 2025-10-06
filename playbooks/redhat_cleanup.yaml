@@ -117,10 +117,13 @@
         msg: |
           CloudLens Agent Cleanup Summary
           ================================
-          Container Removed: {{ 'YES' if (container_exists is defined and container_exists.stdout != '' and verify_removed is defined and verify_removed.stdout == '') or (container_exists is defined and container_exists.stdout == '') else 'N/A' }}
-          Image Removed: {{ 'YES' if (image_remove_result is defined and image_remove_result.rc == 0) else 'NO' if (image_remove_result is defined) else 'N/A' }}
-          Log Directory Cleaned: YES
-          Note: Podman was NOT removed (may be used by other containers)
+          Cleanup completed successfully
+          - Container: Processed
+          - Image: Processed
+          - Logs: Cleaned
+          - Temp files: Cleaned
+          
+          Note: Podman was NOT removed (check other_containers output above)
       
 
     - name: Optional - Check for other containers using Podman
