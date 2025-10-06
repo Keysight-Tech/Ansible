@@ -6,40 +6,23 @@
     - ../vars/cloudlens.yaml
 
   tasks:
-    - name: Check if Docker is installed
-      ansible.builtin.command: command -v docker
-      register: docker_check
-      failed_when: false
+    - name: Force stop CloudLens container
+      ansible.builtin.shell: docker stop {{ cloudlens_agent_container_name }} || true
       changed_when: false
 
-    - name: Stop CloudLens container (always runs if Docker exists)
-      ansible.builtin.command: docker stop {{ cloudlens_agent_container_name }}
-      when: docker_check.rc == 0
-      ignore_errors: yes
-
-    - name: Remove CloudLens container (always runs if Docker exists)
-      ansible.builtin.command: docker rm -f {{ cloudlens_agent_container_name }}
-      when: docker_check.rc == 0
-      ignore_errors: yes
-
-    - name: Remove CloudLens image (always runs if Docker exists)
-      ansible.builtin.command: docker rmi -f {{ cloudlens_manager_ip_or_FQDN }}/sensor
-      when: docker_check.rc == 0
-      ignore_errors: yes
-
-    - name: Verify container is gone
-      ansible.builtin.shell: docker ps -a --format '{{"{{"}}.Names{{"}}"}}'
-      register: remaining_containers
-      when: docker_check.rc == 0
+    - name: Force remove CloudLens container
+      ansible.builtin.shell: docker rm -f {{ cloudlens_agent_container_name }} || true
       changed_when: false
 
-    - name: FAIL if CloudLens container still exists
-      fail:
-        msg: "ERROR: CloudLens container still running!"
-      when:
-        - docker_check.rc == 0
-        - remaining_containers.stdout is defined
-        - cloudlens_agent_container_name in remaining_containers.stdout
+    - name: Force remove CloudLens image
+      ansible.builtin.shell: docker rmi -f {{ cloudlens_manager_ip_or_FQDN }}/sensor || true
+      ignore_errors: yes
+
+    - name: Verify removal
+      ansible.builtin.shell: docker ps -a | grep {{ cloudlens_agent_container_name }}
+      register: check_container
+      failed_when: check_container.rc == 0
+      changed_when: false
 
     - name: Remove CA certificates
       ansible.builtin.file:
@@ -48,64 +31,33 @@
       loop:
         - "{{ ca_cert_dir }}/cloudlenscerts.crt"
         - "/etc/docker/certs.d/{{ cloudlens_manager_ip_or_FQDN }}/ca.crt"
-        - "/etc/docker/certs.d/{{ cloudlens_manager_ip_or_FQDN }}"
       ignore_errors: yes
 
-    - name: Remove Docker daemon config
+    - name: Remove Docker config
       ansible.builtin.file:
         path: /etc/docker/daemon.json
         state: absent
 
-    - name: Remove CloudLens directories
+    - name: Remove logs
       ansible.builtin.file:
-        path: "{{ item }}"
+        path: /var/log/cloudlens
         state: absent
-      loop:
-        - /var/log/cloudlens
-        - /var/lib/docker/volumes/cloudlens
 
-    - name: Display Docker removal setting
-      debug:
-        msg: "Docker will be {{ 'REMOVED' if (remove_docker | default(false)) else 'KEPT' }}"
-
-    # DOCKER REMOVAL SECTION (only if remove_docker=true)
-    - name: Stop Docker service
-      ansible.builtin.systemd:
-        name: docker
-        state: stopped
-      when: remove_docker | default(false)
-
-    - name: Remove Docker packages
+    - name: Remove Docker (OPTIONAL)
       ansible.builtin.apt:
         name:
           - docker-ce
           - docker-ce-cli
           - containerd.io
         state: absent
-        autoremove: yes
-      when: remove_docker | default(false)
+      when: remove_docker | default(false) | bool
 
-    - name: Remove Docker files
-      ansible.builtin.file:
-        path: "{{ item }}"
-        state: absent
-      loop:
-        - /etc/apt/sources.list.d/docker.list
-        - /usr/share/keyrings/docker-archive-keyring.gpg
-        - /etc/docker
-      when: remove_docker | default(false)
-
-    - name: Final check
-      ansible.builtin.shell: |
-        echo "=== Docker Status ==="
-        docker ps -a 2>/dev/null || echo "Docker removed or not running"
-        echo ""
-        echo "=== CloudLens Status ==="
-        ps aux | grep cloudlens | grep -v grep || echo "CloudLens removed"
-      register: final_status
+    - name: Final verification
+      ansible.builtin.shell: docker ps -a
+      register: final
       changed_when: false
       failed_when: false
 
-    - name: Show final status
+    - name: Show result
       debug:
-        var: final_status.stdout_lines
+        var: final.stdout_lines
