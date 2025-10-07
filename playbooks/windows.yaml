@@ -1,5 +1,5 @@
 ---
-- name: Deploy CloudLens Agent to Windows VMs
+- name: Deploy CloudLens Agent to Windows VMs 
   hosts: "{{ target_group }}"
   become: no
   vars_files:
@@ -62,6 +62,7 @@
           Write-Output "No processes to kill"
         }
       when: "'FOUND' in cloudlens_check.stdout"
+      ignore_errors: true
 
     - name: Uninstall CloudLens Agent completely
       win_shell: |
@@ -127,14 +128,13 @@
           }
         }
         Write-Output "Removed $removed registry entries"
+      ignore_errors: true
 
-    - name: Remove CloudLens directories
+    - name: Remove CloudLens program directory only
       win_file:
-        path: "{{ item }}"
+        path: C:\Program Files\Keysight\CloudLens
         state: absent
-      loop:
-        - C:\Program Files\Keysight\CloudLens
-        - C:\ProgramData\CloudLens
+      ignore_errors: true
 
     - name: Wait for filesystem operations to complete
       ansible.builtin.pause:
@@ -246,6 +246,30 @@
       ansible.builtin.pause:
         seconds: 60
 
+    - name: Wait for config file creation
+      win_shell: |
+        $configPath = "C:\ProgramData\CloudLens\Config\agent.yml"
+        $maxWait = 30
+        $waited = 0
+        
+        Write-Output "Waiting for config file..."
+        while ($waited -lt $maxWait) {
+          if (Test-Path $configPath) {
+            Write-Output "Config created after $waited seconds"
+            exit 0
+          }
+          Start-Sleep -Seconds 2
+          $waited += 2
+          if ($waited % 10 -eq 0) {
+            Write-Output "Still waiting... ($waited/$maxWait seconds)"
+          }
+        }
+        Write-Output "WARNING: Config not created after $maxWait seconds"
+        exit 1
+      register: config_wait
+      changed_when: false
+      failed_when: false
+
     - name: Check service status with retries
       win_shell: |
         for ($i = 1; $i -le 12; $i++) {
@@ -309,7 +333,6 @@
 
     - name: Check config file
       win_shell: |
-        Start-Sleep -Seconds 5
         if (Test-Path "C:\ProgramData\CloudLens\Config\agent.yml") {
           Write-Output "Config exists"
           Get-Content "C:\ProgramData\CloudLens\Config\agent.yml" | Select-Object -First 15
@@ -334,4 +357,4 @@
           Registry: {{ 'PRESENT' if registry_check.rc == 0 else 'MISSING' }}
           Config: {{ 'EXISTS' if 'Config exists' in config_check.stdout else 'MISSING' }}
           
-          Result: {{ 'SUCCESS' if (service_check.rc == 0 and process_check.rc == 0) else 'PARTIAL' }}
+          Result: {{ 'SUCCESS' if (service_check.rc == 0 and process_check.rc == 0 and 'Config exists' in config_check.stdout) else 'PARTIAL' }}
