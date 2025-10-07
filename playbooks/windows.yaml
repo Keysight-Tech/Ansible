@@ -328,3 +328,11 @@
           Config: {{ 'EXISTS' if 'Config exists' in config_check.stdout else 'MISSING' }}
           
           Result: {{ 'SUCCESS' if (service_check.rc == 0 and process_check.rc == 0 and 'Config exists' in config_check.stdout) else 'PARTIAL' }}
+
+    - name: Clean up installer log files
+      win_shell: |
+        Get-ChildItem "C:\temp" -Filter "*cloudlens*" -File | Where-Object { $_.Name -like "*.log*" -or $_.Name -eq "cloudlens_uninstall" } | ForEach-Object {
+          Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
+        }
+        Write-Output "Cleaned up CloudLens log files"
+      ignore_errors: true      
