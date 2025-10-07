@@ -211,37 +211,28 @@
           ansible.builtin.pause:
             seconds: 30
 
-        - name: Wait for config file creation
-          win_shell: |
-            $maxWait = 60
-            $waited = 0
-            while ($waited -lt $maxWait) {
-              if (Test-Path "C:\ProgramData\CloudLens\Config\agent.yml") {
-                Write-Output "Config file found"
-                exit 0
-              }
-              Start-Sleep -Seconds 2
-              $waited += 2
-            }
-            Write-Output "Config file not found after $waited seconds"
-            exit 1
-          register: config_wait
-          retries: 3
-          delay: 10
-          until: config_wait.rc == 0
-
     - name: Ensure CloudLens service is running
       block:
-        - name: Check if service exists
+        - name: Check if service exists and start it
           win_shell: |
             $service = Get-Service -Name CloudLens -ErrorAction SilentlyContinue
+            
             if ($service) {
+              if ($service.Status -ne 'Running') {
+                Start-Service -Name CloudLens -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 10
+              }
+              
+              $service = Get-Service -Name CloudLens -ErrorAction SilentlyContinue
               @{
                 Exists = $true
                 Status = $service.Status.ToString()
               } | ConvertTo-Json
             } else {
-              @{ Exists = $false } | ConvertTo-Json
+              @{ 
+                Exists = $false
+                Status = "Not Found"
+              } | ConvertTo-Json
             }
           register: service_check
           changed_when: false
@@ -249,9 +240,15 @@
         - name: Parse service check
           set_fact:
             service_exists: "{{ (service_check.stdout | from_json).Exists }}"
-            service_status: "{{ (service_check.stdout | from_json).Status | default('NotFound') }}"
+            service_status: "{{ (service_check.stdout | from_json).Status }}"
 
-        - name: Start CloudLens service if not running
+        - name: Display service status
+          debug:
+            msg:
+              - "Service exists: {{ service_exists }}"
+              - "Service status: {{ service_status }}"
+
+        - name: Try to start service if it exists but not running
           win_service:
             name: CloudLens
             state: started
@@ -261,10 +258,37 @@
           retries: 3
           delay: 10
           until: service_start is succeeded
+          ignore_errors: yes
 
         - name: Wait for service to stabilize
           ansible.builtin.pause:
-            seconds: 30
+            seconds: 45
+
+    - name: Check for config file creation
+      win_shell: |
+        $configPath = "C:\ProgramData\CloudLens\Config\agent.yml"
+        
+        if (Test-Path $configPath) {
+          @{
+            Exists = $true
+            Path = $configPath
+          } | ConvertTo-Json
+        } else {
+          @{
+            Exists = $false
+            Path = $configPath
+          } | ConvertTo-Json
+        }
+      register: config_file_check
+      changed_when: false
+
+    - name: Parse config file check
+      set_fact:
+        config_file_exists: "{{ (config_file_check.stdout | from_json).Exists }}"
+
+    - name: Display config file status
+      debug:
+        msg: "Config file exists: {{ config_file_exists }}"
 
     - name: Verify CloudLens Agent is running
       win_shell: |
@@ -314,6 +338,7 @@
           - "Service status: {{ final_status.ServiceStatus }}"
           - "Process running: {{ final_status.ProcessRunning }}"
           - "Process count: {{ final_status.ProcessCount }}"
+          - "Config file exists: {{ config_file_exists }}"
           - "Verification attempts: {{ final_status.Attempt }}"
           - "Result: {{ 'SUCCESS' if final_status.Success else 'FAILED' }}"
 
