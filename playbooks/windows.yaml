@@ -1,5 +1,5 @@
 ---
-- name: Deploy CloudLens Agent to Windows VMs (Force Reinstall)
+- name: Deploy CloudLens Agent to Windows VMs
   hosts: "{{ target_group }}"
   become: no
   vars_files:
