@@ -205,7 +205,7 @@
         - name: Fail if installation failed
           fail:
             msg: "CloudLens Agent installation failed with exit code {{ install_exit_code }}"
-          when: install_exit_code != 0
+          when: not install_success
 
         - name: Wait for installation to complete
           ansible.builtin.pause:
