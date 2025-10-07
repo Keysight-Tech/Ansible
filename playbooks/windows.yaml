@@ -1,5 +1,5 @@
 ---
-- name: Deploy CloudLens Agent to Windows VMs 
+- name: Deploy CloudLens Agent to Windows VMs (Force Reinstall)
   hosts: "{{ target_group }}"
   become: no
   vars_files:
@@ -52,11 +52,15 @@
       changed_when: "'Service stopped' in stop_service.stdout"
       when: "'FOUND' in cloudlens_check.stdout"
 
-    - name: Kill any CloudLens processes
+    - name: Kill all CloudLens processes
       win_shell: |
-        Get-Process | Where-Object { $_.ProcessName -like "*CloudLens*" } | Stop-Process -Force
-        Write-Output "Processes killed"
-      ignore_errors: true
+        $procs = Get-Process | Where-Object { $_.ProcessName -like "*CloudLens*" }
+        if ($procs) {
+          $procs | Stop-Process -Force
+          Write-Output "Killed $($procs.Count) processes"
+        } else {
+          Write-Output "No processes to kill"
+        }
       when: "'FOUND' in cloudlens_check.stdout"
 
     - name: Uninstall CloudLens Agent completely
@@ -102,7 +106,7 @@
 
     - name: Wait for uninstall to complete
       ansible.builtin.pause:
-        seconds: 60
+        seconds: 45
       when: "'FOUND' in cloudlens_check.stdout"
 
     - name: Force remove all CloudLens registry entries
@@ -123,7 +127,6 @@
           }
         }
         Write-Output "Removed $removed registry entries"
-      ignore_errors: true
 
     - name: Remove CloudLens directories
       win_file:
@@ -132,28 +135,36 @@
       loop:
         - C:\Program Files\Keysight\CloudLens
         - C:\ProgramData\CloudLens
-      ignore_errors: true
+
+    - name: Wait for filesystem operations to complete
+      ansible.builtin.pause:
+        seconds: 10
 
     - name: Verify complete cleanup
       win_shell: |
-        $service = Get-Service -Name CloudLens -ErrorAction SilentlyContinue
-        $process = Get-Process | Where-Object { $_.ProcessName -like "*CloudLens*" }
-        $paths = @(
-          "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
-          "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
-        )
-        $registry = Get-ItemProperty $paths -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like "*CloudLens*" }
+        $retries = 0
+        $maxRetries = 5
         
-        $issues = @()
-        if ($service) { $issues += "Service exists" }
-        if ($process) { $issues += "Process running" }
-        if ($registry) { $issues += "Registry exists" }
-        
-        if ($issues.Count -eq 0) {
-          Write-Output "CLEAN"
-        } else {
-          Write-Output "Issues: $($issues -join ', ')"
+        while ($retries -lt $maxRetries) {
+          $service = Get-Service -Name CloudLens -ErrorAction SilentlyContinue
+          $process = Get-Process | Where-Object { $_.ProcessName -like "*CloudLens*" }
+          $paths = @(
+            "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+            "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+          )
+          $registry = Get-ItemProperty $paths -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like "*CloudLens*" }
+          
+          if (-not $service -and -not $process -and -not $registry) {
+            Write-Output "CLEAN: System ready"
+            exit 0
+          }
+          
+          $retries++
+          Write-Output "Retry $retries/$maxRetries - waiting for cleanup..."
+          Start-Sleep -Seconds 5
         }
+        Write-Output "WARNING: Cleanup incomplete but proceeding"
+        exit 0
       register: cleanup_status
       changed_when: false
 
@@ -171,6 +182,10 @@
         path: C:\temp\{{ cloudlens_installer_filename }}
       register: installer_file
       failed_when: not installer_file.stat.exists
+
+    - name: Display installer size
+      debug:
+        msg: "Installer: {{ (installer_file.stat.size / 1024 / 1024) | round(2) }} MB"
 
     - name: Install CloudLens Agent
       win_shell: |
@@ -201,6 +216,32 @@
       debug:
         var: install_result.stdout_lines
 
+    - name: Get CloudLens version info
+      win_shell: |
+        Start-Sleep -Seconds 5
+        $paths = @(
+          "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+          "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+        )
+        $app = Get-ItemProperty $paths -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like "*CloudLens*" }
+        
+        if ($app) {
+          Write-Output "=== CloudLens Installation ==="
+          Write-Output "Name: $($app.DisplayName)"
+          Write-Output "Version: $($app.DisplayVersion)"
+          Write-Output "Publisher: $($app.Publisher)"
+          Write-Output "Install Date: $($app.InstallDate)"
+        } else {
+          Write-Output "Not found in registry yet"
+        }
+      register: version_info
+      changed_when: false
+      ignore_errors: true
+
+    - name: Display version info
+      debug:
+        var: version_info.stdout_lines
+
     - name: Wait for CloudLens to initialize
       ansible.builtin.pause:
         seconds: 60
@@ -208,32 +249,32 @@
     - name: Check service status with retries
       win_shell: |
         for ($i = 1; $i -le 12; $i++) {
-          Write-Output "Attempt $i/12"
+          Write-Output "Check $i/12"
           $service = Get-Service -Name CloudLens -ErrorAction SilentlyContinue
           
           if ($service) {
-            Write-Output "Service found: $($service.Status)"
+            Write-Output "Service: $($service.Status)"
             
             if ($service.Status -ne "Running") {
-              Write-Output "Starting service..."
+              Write-Output "Starting..."
               Start-Service -Name CloudLens -ErrorAction SilentlyContinue
               Start-Sleep -Seconds 5
               $service = Get-Service -Name CloudLens
             }
             
             if ($service.Status -eq "Running") {
-              Write-Output "SUCCESS: Service running"
+              Write-Output "SUCCESS: Running"
               exit 0
             }
           }
           Start-Sleep -Seconds 5
         }
-        Write-Output "WARNING: Service not running"
+        Write-Output "WARNING: Not running"
         exit 0
       register: service_check
       changed_when: false
 
-    - name: Check for CloudLens process
+    - name: Check process
       win_shell: |
         Start-Sleep -Seconds 10
         $process = Get-Process | Where-Object { $_.ProcessName -like "*CloudLens*" }
@@ -241,14 +282,14 @@
           $process | ForEach-Object { Write-Output "$($_.ProcessName) - PID: $($_.Id)" }
           exit 0
         } else {
-          Write-Output "No process found"
+          Write-Output "No process"
           exit 1
         }
       register: process_check
       changed_when: false
       failed_when: false
 
-    - name: Verify registry entry
+    - name: Verify registry
       win_shell: |
         $paths = @(
           "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
@@ -256,37 +297,41 @@
         )
         $app = Get-ItemProperty $paths -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like "*CloudLens*" }
         if ($app) {
-          Write-Output "Installed: $($app.DisplayVersion)"
+          Write-Output "Version: $($app.DisplayVersion)"
           exit 0
         } else {
-          Write-Output "Not found in registry"
+          Write-Output "Not in registry"
           exit 1
         }
       register: registry_check
       changed_when: false
       failed_when: registry_check.rc != 0
 
-    - name: Check configuration file
+    - name: Check config file
       win_shell: |
         Start-Sleep -Seconds 5
         if (Test-Path "C:\ProgramData\CloudLens\Config\agent.yml") {
           Write-Output "Config exists"
           Get-Content "C:\ProgramData\CloudLens\Config\agent.yml" | Select-Object -First 15
         } else {
-          Write-Output "Config not found"
+          Write-Output "Config missing"
         }
       register: config_check
       changed_when: false
       ignore_errors: true
 
-    - name: Final deployment status
+    - name: Display config
+      debug:
+        var: config_check.stdout_lines
+
+    - name: Final status
       debug:
         msg: |
-          CloudLens Deployment Status
-          ===========================
+          CloudLens Deployment
+          ====================
           Service: {{ 'RUNNING' if service_check.rc == 0 else 'NOT RUNNING' }}
-          Process: {{ 'FOUND' if process_check.rc == 0 else 'NOT FOUND' }}
+          Process: {{ 'YES' if process_check.rc == 0 else 'NO' }}
           Registry: {{ 'PRESENT' if registry_check.rc == 0 else 'MISSING' }}
           Config: {{ 'EXISTS' if 'Config exists' in config_check.stdout else 'MISSING' }}
           
-          Overall: {{ 'SUCCESS' if (service_check.rc == 0 and process_check.rc == 0) else 'PARTIAL - May need more time' }}
+          Result: {{ 'SUCCESS' if (service_check.rc == 0 and process_check.rc == 0) else 'PARTIAL' }}
