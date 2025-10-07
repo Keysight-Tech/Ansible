@@ -1,5 +1,5 @@
 ---
-- name: Deploy CloudLens Agent to Windows VMs (Force Reinstall)
+- name: Deploy CloudLens Agent to Windows VMs 
   hosts: "{{ target_group }}"
   become: no
   vars_files:
@@ -102,7 +102,7 @@
 
     - name: Wait for uninstall to complete
       ansible.builtin.pause:
-        seconds: 30
+        seconds: 60
       when: "'FOUND' in cloudlens_check.stdout"
 
     - name: Force remove all CloudLens registry entries
